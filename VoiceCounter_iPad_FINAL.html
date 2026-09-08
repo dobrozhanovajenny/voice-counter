@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Голосовой счётчик">
+<title>Голосовой счётчик</title>
+<style>
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+body {
+  margin:0; font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Helvetica Neue",Arial,sans-serif;
+  background:#f5f5f7; color:#111; min-height:100vh;
+}
+@media (prefers-color-scheme:dark) { body{background:#101014;color:#fff;} .sub,.hint{color:#a7a7b0;} .secondary{background:#24242b;color:#fff;} }
+.app { max-width:900px; min-height:100vh; margin:auto; padding:24px 24px calc(28px + env(safe-area-inset-bottom)); display:flex; flex-direction:column; }
+.top { display:flex; justify-content:space-between; align-items:flex-start; }
+.label { font-size:15px; font-weight:700; letter-spacing:2px; }
+.sub { color:#777; font-size:14px; margin-top:5px; }
+.status { display:flex; align-items:center; gap:8px; color:#777; font-size:14px; }
+.dot { width:10px;height:10px;border-radius:50%;background:#34c759; }
+.dot.listen { background:#ff3b30; box-shadow:0 0 0 7px rgba(255,59,48,.14); }
+main { flex:1; display:flex; flex-direction:column; justify-content:center; }
+.number { text-align:center; font-size:clamp(78px,15vw,150px); font-weight:800; letter-spacing:-5px; line-height:1; font-variant-numeric:tabular-nums; }
+.heard{min-height:28px;text-align:center;color:#666;font-size:18px;margin-top:6px;word-break:break-word;}
+.command { height:32px; text-align:center; color:#777; margin-top:14px; font-size:17px; }
+.voice {
+  border:0; border-radius:22px; height:72px; width:100%; color:white; font-size:20px; font-weight:700;
+  background:#007aff; margin-top:32px; box-shadow:0 8px 25px rgba(0,122,255,.22);
+}
+.voice.listening { background:#ff3b30; }
+.controls { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:14px; }
+button { cursor:pointer; font-family:inherit; }
+.secondary {
+  height:64px; border:0; border-radius:20px; background:#e6e6eb; color:#111; font-size:23px; font-weight:700;
+}
+.reset { margin-top:12px; height:48px; border:0; background:transparent; color:#777; font-size:16px; }
+.hint { text-align:center; color:#888; font-size:14px; line-height:1.45; margin-top:10px; }
+.history { margin-top:22px; background:rgba(127,127,127,.10); border-radius:20px; padding:16px; }
+.history h2 { margin:0 0 10px; font-size:16px; }
+.row { display:flex; justify-content:space-between; gap:12px; padding:8px 0; border-bottom:1px solid rgba(127,127,127,.15); font-size:14px; }
+.row:last-child {border-bottom:0;}
+.empty {color:#888;text-align:center;padding:8px;}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="top">
+    <div>
+      <div class="label">СЧЁТЧИК</div>
+      <div class="sub">от 0 до 5000</div>
+    </div>
+    <div class="status"><span id="dot" class="dot"></span><span id="status">Готов</span></div>
+  </div>
+
+  <main>
+    <div id="number" class="number">0</div>
+    <div id="command" class="command">Готов к команде</div>
+<div id="heard" class="heard" aria-live="polite"></div>
+
+    <button id="voice" class="voice">🎙️ Включить голос</button>
+
+    <div class="controls">
+      <button class="secondary" id="minus">− 1</button>
+      <button class="secondary" id="plus">+ 1</button>
+    </div>
+    <button class="reset" id="reset">Сбросить</button>
+
+    <div class="hint">
+      Примеры: «плюс один», «плюс сто», «минус 25»,<br>
+      «прибавь 500», «установи 1200», «сброс»
+    </div>
+
+    <div class="history">
+      <h2>Последние команды</h2>
+      <div id="historyList" class="empty">Пока нет команд</div>
+    </div>
+  </main>
+</div>
+
+<script>
+const MIN=0, MAX=5000;
+let value = Number(localStorage.getItem('voiceCounterValue') || 0);
+let history = JSON.parse(localStorage.getItem('voiceCounterHistory') || '[]');
+let listening=false, recognition=null, lastProcessed='';
+
+const numberEl=document.getElementById('number');
+const commandEl=document.getElementById('command');
+const voiceBtn=document.getElementById('voice');
+const statusEl=document.getElementById('status');
+const dot=document.getElementById('dot');
+const historyList=document.getElementById('historyList');
+
+function render(){
+  numberEl.textContent=value.toLocaleString('ru-RU');
+  renderHistory();
+  localStorage.setItem('voiceCounterValue',value);
+}
+function addHistory(text, oldValue, newValue){
+  history.unshift({text, oldValue, newValue, time:new Date().toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})});
+  history=history.slice(0,8);
+  localStorage.setItem('voiceCounterHistory',JSON.stringify(history));
+  renderHistory();
+}
+function renderHistory(){
+  if(!history.length){historyList.innerHTML='<div class="empty">Пока нет команд</div>';return;}
+  historyList.innerHTML=history.map(x=>`<div class="row"><span>${escapeHtml(x.text)} → ${x.newValue}</span><span>${x.time}</span></div>`).join('');
+}
+function escapeHtml(s){return s.replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));}
+function setValue(newValue, label){
+  const old=value;
+  value=Math.min(MAX,Math.max(MIN,Math.round(newValue)));
+  numberEl.textContent=value.toLocaleString('ru-RU');
+  commandEl.textContent=label;
+  if(old!==value) addHistory(label,old,value);
+  localStorage.setItem('voiceCounterValue',value);
+}
+function change(n,label){
+  setValue(value+n,label);
+}
+document.getElementById('plus').onclick=()=>change(1,'Плюс 1');
+document.getElementById('minus').onclick=()=>change(-1,'Минус 1');
+document.getElementById('reset').onclick=()=>setValue(0,'Сброшено');
+
+
+const units={'ноль':0,'один':1,'одна':1,'одно':1,'два':2,'две':2,'три':3,'четыре':4,'пять':5,'шесть':6,'семь':7,'восемь':8,'девять':9};
+const teens={'десять':10,'одиннадцать':11,'двенадцать':12,'тринадцать':13,'четырнадцать':14,'пятнадцать':15,'шестнадцать':16,'семнадцать':17,'восемнадцать':18,'девятнадцать':19};
+const tens={'двадцать':20,'тридцать':30,'сорок':40,'пятьдесят':50,'шестьдесят':60,'семьдесят':70,'восемьдесят':80,'девяносто':90};
+const hundreds={'сто':100,'двести':200,'триста':300,'четыреста':400,'пятьсот':500,'шестьсот':600,'семьсот':700,'восемьсот':800,'девятьсот':900};
+
+function normalizeSpeech(text){
+  return text.toLowerCase()
+    .replace(/[«»"']/g,' ')
+    .replace(/[.,!?;:]/g,' ')
+    .replace(/\s+/g,' ')
+    .trim();
+}
+
+function wordsNumber(text){
+  const w=normalizeSpeech(text).replace(/-/g,' ').split(/\s+/);
+  let total=0, current=0, found=false;
+  for(const x of w){
+    if(units[x]!==undefined){current+=units[x];found=true;}
+    else if(teens[x]!==undefined){current+=teens[x];found=true;}
+    else if(tens[x]!==undefined){current+=tens[x];found=true;}
+    else if(hundreds[x]!==undefined){current+=hundreds[x];found=true;}
+    else if(['тысяча','тысячу','тысячи','тысяч'].includes(x)){
+      if(current===0) current=1;
+      total += current*1000; current=0; found=true;
+    }
+  }
+  return found ? total+current : null;
+}
+
+function extractNumber(text){
+  const match=normalizeSpeech(text).match(/\b\d+(?:[.,]\d+)?\b/);
+  if(match) return Math.round(Number(match[0].replace(',','.')));
+  return wordsNumber(text);
+}
+
+function showHeard(text){
+  const heard=document.getElementById('heard');
+  if(heard) heard.textContent=text ? `Я услышал: «${text}»` : '';
+}
+
+function processCommand(raw){
+  let text=normalizeSpeech(raw);
+  if(!text) return;
+
+  showHeard(text);
+
+  // More tolerant command words and common recognition variants.
+  const isReset = /\b(сброс|сбросить|обнулить|ноль|начать заново)\b/.test(text);
+  if(isReset){
+    setValue(0,'Сброс');
+    return;
+  }
+
+  const n=extractNumber(text);
+  if(n===null){
+    commandEl.textContent='Не понял команду';
+    return;
+  }
+
+  if(/\b(установи|установить|поставь|поставить|запиши|записать|сделай)\b/.test(text)){
+    setValue(n,`Установить ${n}`);
+    return;
+  }
+
+  if(/\b(минус|убавь|убавить|вычти|вычесть|отними|отнять|отнять)\b/.test(text)){
+    change(-n,`Минус ${n}`);
+    return;
+  }
+
+  if(/(?:\b(плюс|прибавь|прибавить|добавь|добавить)\b|\+\s*\d)/.test(text)){
+    change(n,`Плюс ${n}`);
+    return;
+  }
+
+  // If only a number was spoken, treat it as setting the counter.
+  if(/^\d+(?:[.,]\d+)?$/.test(text) || wordsNumber(text)!==null){
+    setValue(n,`Установить ${n}`);
+    return;
+  }
+
+  commandEl.textContent='Не понял команду';
+}
+
+if('webkitSpeechRecognition' in window || 'SpeechRecognition' in window){
+  const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
+  recognition=new SpeechRecognition();
+  recognition.lang='ru-RU';
+  recognition.interimResults=false;
+  recognition.continuous=false;
+  recognition.maxAlternatives=5;
+
+  // Голосовой режим: нажимаем кнопку один раз, после каждой фразы
+  // распознавание запускается снова автоматически.
+  let voiceMode=false;
+  let restartTimer=null;
+
+  function updateVoiceButton(){
+    if(voiceMode){
+      voiceBtn.classList.add('listening');
+      voiceBtn.textContent='🔴 Голос включён — нажмите, чтобы выключить';
+    }else{
+      voiceBtn.classList.remove('listening');
+      voiceBtn.textContent='🎙️ Включить голос';
+    }
+  }
+
+  function startRecognition(){
+    if(!voiceMode || listening) return;
+    try{
+      recognition.start();
+    }catch(e){
+      // Safari может сообщить, что распознавание уже запускается.
+    }
+  }
+
+  recognition.onstart=()=>{
+    listening=true;
+    dot.classList.add('listening');
+    statusEl.textContent='Слушаю…';
+    updateVoiceButton();
+    commandEl.textContent='Говорите команду';
+  };
+
+  recognition.onresult=(event)=>{
+    let best='';
+    for(let i=0;i<event.results.length;i++){
+      const result=event.results[i];
+      for(let j=0;j<result.length;j++){
+        const candidate=(result[j].transcript||'').trim();
+        if(candidate){ best=candidate; break; }
+      }
+      if(best) break;
+    }
+    if(best) processCommand(best);
+  };
+
+  recognition.onerror=(event)=>{
+    if(event.error==='not-allowed' || event.error==='service-not-allowed'){
+      voiceMode=false;
+      commandEl.textContent='Нет доступа к микрофону';
+      statusEl.textContent='Готов';
+      updateVoiceButton();
+      return;
+    }
+
+    if(event.error==='no-speech'){
+      commandEl.textContent='Жду следующую команду…';
+    }else{
+      commandEl.textContent=`Ошибка распознавания: ${event.error}`;
+    }
+  };
+
+  recognition.onend=()=>{
+    listening=false;
+    dot.classList.remove('listening');
+
+    if(voiceMode){
+      statusEl.textContent='Готов к следующей команде';
+      updateVoiceButton();
+      clearTimeout(restartTimer);
+      restartTimer=setTimeout(startRecognition,350);
+    }else{
+      statusEl.textContent='Готов';
+      updateVoiceButton();
+    }
+  };
+
+  voiceBtn.onclick=()=>{
+    if(voiceMode){
+      voiceMode=false;
+      clearTimeout(restartTimer);
+      if(listening){
+        try{ recognition.stop(); }catch(e){}
+      }
+      statusEl.textContent='Голос выключен';
+      commandEl.textContent='Нажмите «Включить голос», чтобы продолжить';
+      updateVoiceButton();
+      return;
+    }
+
+    voiceMode=true;
+    showHeard('');
+    updateVoiceButton();
+    statusEl.textContent='Запускаю микрофон…';
+    commandEl.textContent='Сейчас можно говорить';
+    startRecognition();
+  };
+}else{
+  statusEl.textContent='Голос недоступен';
+  commandEl.textContent='Safari не поддерживает распознавание речи на этом устройстве';
+  voiceBtn.disabled=true;
+}
+
+</script>
+</body>
+</html>
