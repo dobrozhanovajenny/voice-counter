@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Счётчик</title>
+<style>
+  *{box-sizing:border-box}
+  body{
+    margin:0;
+    min-height:100vh;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    background:#f4f4f7;
+    color:#111;
+    display:flex;
+    justify-content:center;
+  }
+  .app{
+    width:min(680px,100%);
+    padding:28px 20px 40px;
+    text-align:center;
+  }
+  h1{font-size:28px;margin:10px 0 8px}
+  .range{color:#777;font-size:15px;margin-bottom:20px}
+  .count{
+    font-size:clamp(80px,20vw,150px);
+    line-height:1;
+    font-weight:700;
+    margin:20px 0 28px;
+    font-variant-numeric:tabular-nums;
+  }
+  button{
+    border:0;
+    border-radius:18px;
+    font-size:22px;
+    font-weight:600;
+    padding:18px 22px;
+    margin:6px;
+    min-width:120px;
+    background:white;
+    box-shadow:0 3px 12px rgba(0,0,0,.10);
+    -webkit-tap-highlight-color:transparent;
+  }
+  button:active{transform:scale(.97)}
+  .voice{
+    width:calc(100% - 12px);
+    max-width:520px;
+    background:#111;
+    color:white;
+    padding:20px;
+  }
+  .voice.on{background:#c62828}
+  .reset{font-size:18px;min-width:160px;margin-top:12px}
+  .status{
+    min-height:28px;
+    margin:14px 0 6px;
+    font-size:16px;
+    color:#555;
+  }
+  .heard{
+    min-height:24px;
+    margin-bottom:18px;
+    color:#777;
+    font-size:15px;
+  }
+  .history{
+    margin-top:30px;
+    text-align:left;
+    background:white;
+    border-radius:18px;
+    padding:18px;
+    box-shadow:0 3px 12px rgba(0,0,0,.06);
+  }
+  .history h2{font-size:19px;margin:0 0 10px}
+  .item{
+    padding:9px 0;
+    border-bottom:1px solid #eee;
+    font-size:15px;
+  }
+  .item:last-child{border-bottom:0}
+  .empty{color:#999}
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>СЧЁТЧИК</h1>
+  <div class="range">от 0 до 5000</div>
+
+  <div id="count" class="count">0</div>
+
+  <button id="voiceBtn" class="voice">🎙️ Включить голос</button>
+
+  <div id="status" class="status">Голосовой режим выключен</div>
+  <div id="heard" class="heard"></div>
+
+  <div>
+    <button id="minus">−1</button>
+    <button id="plus">+1</button>
+  </div>
+
+  <button id="reset" class="reset">Сбросить</button>
+
+  <div class="history">
+    <h2>История</h2>
+    <div id="history"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  const MIN=0, MAX=5000;
+  const countEl=document.getElementById('count');
+  const voiceBtn=document.getElementById('voiceBtn');
+  const statusEl=document.getElementById('status');
+  const heardEl=document.getElementById('heard');
+  const historyEl=document.getElementById('history');
+
+  let count=Number(localStorage.getItem('voiceCounterValue')||0);
+  let history=JSON.parse(localStorage.getItem('voiceCounterHistory')||'[]');
+
+  function render(){
+    countEl.textContent=count;
+    historyEl.innerHTML=history.length
+      ? history.slice(0,30).map(x=>'<div class="item">'+escapeHtml(x)+'</div>').join('')
+      : '<div class="empty">Пока нет действий</div>';
+  }
+
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
+  }
+
+  function save(){
+    localStorage.setItem('voiceCounterValue',String(count));
+    localStorage.setItem('voiceCounterHistory',JSON.stringify(history));
+  }
+
+  function addHistory(text){
+    history.unshift(new Date().toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})+' — '+text+' → '+count);
+    history=history.slice(0,30);
+    save();
+    render();
+  }
+
+  function setCount(n,description){
+    n=Math.max(MIN,Math.min(MAX,Math.round(n)));
+    count=n;
+    addHistory(description);
+  }
+
+  function change(delta,description){
+    setCount(count+delta,description);
+  }
+
+  document.getElementById('plus').onclick=()=>change(1,'Плюс 1');
+  document.getElementById('minus').onclick=()=>change(-1,'Минус 1');
+  document.getElementById('reset').onclick=()=>setCount(0,'Сброс');
+
+  /*
+    ВАЖНО:
+    Safari на iPad завершает отдельную сессию SpeechRecognition после результата.
+    Поэтому здесь НЕ используется recognition.continuous=true.
+    Вместо этого создаётся НОВЫЙ объект распознавания после каждого результата.
+    Пока voiceMode=true, следующая сессия запускается автоматически.
+  */
+
+  const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
+  let voiceMode=false;
+  let recognition=null;
+  let restartTimer=null;
+  let starting=false;
+
+  function normalize(s){
+    return String(s||'')
+      .toLowerCase()
+      .replace(/ё/g,'е')
+      .replace(/[.,!?;:]/g,' ')
+      .replace(/\s+/g,' ')
+      .trim();
+  }
+
+  const numberWords={
+    'ноль':0,'один':1,'одна':1,'одно':1,'два':2,'две':2,'три':3,'четыре':4,'пять':5,
+    'шесть':6,'семь':7,'восемь':8,'девять':9,'десять':10,'одиннадцать':11,
+    'двенадцать':12,'тринадцать':13,'четырнадцать':14,'пятнадцать':15,
+    'шестнадцать':16,'семнадцать':17,'восемнадцать':18,'девятнадцать':19,
+    'двадцать':20,'тридцать':30,'сорок':40,'пятьдесят':50,'шестьдесят':60,
+    'семьдесят':70,'восемьдесят':80,'девяносто':90,'сто':100,'двести':200,
+    'триста':300,'четыреста':400,'пятьсот':500,'шестьсот':600,'семьсот':700,
+    'восемьсот':800,'девятьсот':900,'тысяча':1000,'тысячи':1000,'тысяч':1000,
+    'две тысячи':2000,'три тысячи':3000,'четыре тысячи':4000,'пять тысяч':5000
+  };
+
+  function parseNumber(text){
+    text=normalize(text);
+
+    // Arabic digits, including "1 200"
+    let m=text.match(/(\d[\d\s]*)/);
+    if(m){
+      const n=parseInt(m[1].replace(/\s/g,''),10);
+      if(Number.isFinite(n)) return n;
+    }
+
+    if(numberWords[text]!==undefined) return numberWords[text];
+
+    // Exact multiword combinations, e.g. "сто двадцать пять"
+    const tokens=text.split(' ').filter(Boolean);
+    if(tokens.length){
+      let total=0;
+      let current=0;
+      let found=false;
+      for(const token of tokens){
+        if(numberWords[token]!==undefined){
+          const v=numberWords[token];
+          found=true;
+          if(v===1000){
+            total+=(current||1)*1000;
+            current=0;
+          }else{
+            current+=v;
+          }
+        }else{
+          return null;
+        }
+      }
+      if(found) return total+current;
+    }
+    return null;
+  }
+
+  function processCommand(raw){
+    const text=normalize(raw);
+    if(!text) return false;
+
+    // reset
+    if(/\b(сброс|сбрось|сбросить|обнули|обнулить|ноль)\b/.test(text)){
+      setCount(0,'Сброс');
+      return true;
+    }
+
+    // set: "установи 1200", "поставь 500", "сделай 100"
+    let m=text.match(/^(?:установи|установить|поставь|поставить|сделай|сделать|задай|задать)\s+(.+)$/);
+    if(m){
+      const n=parseNumber(m[1]);
+      if(n!==null){ setCount(n,'Установить '+n); return true; }
+    }
+
+    // subtract: "минус 5", "вычти 5"
+    m=text.match(/^(?:минус|вычти|вычесть|убавь|убавить)\s*(.*)$/);
+    if(m){
+      const n=parseNumber(m[1]);
+      if(n!==null){ change(-n,'Минус '+n); return true; }
+    }
+
+    // add: "плюс 5", "прибавь 5", "добавь 5", "+5"
+    m=text.match(/^(?:плюс|прибавь|прибавить|добавь|добавить)\s*(.*)$/);
+    if(m){
+      const n=parseNumber(m[1]);
+      if(n!==null){ change(n,'Плюс '+n); return true; }
+    }
+
+    m=text.match(/^\+\s*(\d+)$/);
+    if(m){ change(parseInt(m[1],10),'Плюс '+m[1]); return true; }
+
+    m=text.match(/^-\s*(\d+)$/);
+    if(m){ change(-parseInt(m[1],10),'Минус '+m[1]); return true; }
+
+    // A bare number means "установить"
+    const bare=parseNumber(text);
+    if(bare!==null){
+      setCount(bare,'Установить '+bare);
+      return true;
+    }
+
+    return false;
+  }
+
+  function setStatus(text){
+    statusEl.textContent=text;
+  }
+
+  function scheduleRestart(){
+    clearTimeout(restartTimer);
+    if(!voiceMode) return;
+    restartTimer=setTimeout(startRecognition,450);
+  }
+
+  function makeRecognition(){
+    if(!SpeechRecognition) return null;
+    const r=new SpeechRecognition();
+    r.lang='ru-RU';
+    r.continuous=false;
+    r.interimResults=false;
+    r.maxAlternatives=5;
+
+    r.onstart=function(){
+      starting=false;
+      if(voiceMode) setStatus('🎙️ Слушаю… Скажите команду');
+    };
+
+    r.onresult=function(event){
+      let best='';
+      for(let i=0;i<event.results.length;i++){
+        const result=event.results[i];
+        for(let j=0;j<result.length;j++){
+          const t=result[j].transcript.trim();
+          if(t){ best=t; break; }
+        }
+      }
+
+      heardEl.textContent=best ? 'Я услышал: «'+best+'»' : '';
+
+      const ok=processCommand(best);
+      if(ok) setStatus('✅ Выполнено. Слушаю следующую команду…');
+      else if(best) setStatus('❓ Не понял команду. Скажите ещё раз…');
+    };
+
+    r.onerror=function(event){
+      if(event.error==='not-allowed'||event.error==='service-not-allowed'){
+        voiceMode=false;
+        voiceBtn.classList.remove('on');
+        voiceBtn.textContent='🎙️ Включить голос';
+        setStatus('Микрофон заблокирован. Разрешите доступ к микрофону в Safari.');
+        return;
+      }
+      if(voiceMode) setStatus('🎙️ Готов к следующей команде…');
+    };
+
+    r.onend=function(){
+      recognition=null;
+      if(voiceMode) scheduleRestart();
+    };
+
+    return r;
+  }
+
+  function startRecognition(){
+    if(!voiceMode || starting || recognition) return;
+    starting=true;
+    recognition=makeRecognition();
+    if(!recognition){ starting=false; return; }
+
+    try{
+      recognition.start();
+    }catch(e){
+      recognition=null;
+      starting=false;
+      if(voiceMode) scheduleRestart();
+    }
+  }
+
+  if(!SpeechRecognition){
+    voiceBtn.disabled=true;
+    voiceBtn.textContent='🎙️ Голос недоступен';
+    setStatus('Этот браузер не поддерживает распознавание речи.');
+  }else{
+    voiceBtn.onclick=function(){
+      if(voiceMode){
+        voiceMode=false;
+        clearTimeout(restartTimer);
+        if(recognition){
+          try{ recognition.abort(); }catch(e){}
+          recognition=null;
+        }
+        starting=false;
+        voiceBtn.classList.remove('on');
+        voiceBtn.textContent='🎙️ Включить голос';
+        setStatus('Голосовой режим выключен');
+      }else{
+        voiceMode=true;
+        voiceBtn.classList.add('on');
+        voiceBtn.textContent='🔴 Голос включён — нажмите, чтобы выключить';
+        heardEl.textContent='';
+        setStatus('Запускаю микрофон…');
+        startRecognition();
+      }
+    };
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>
